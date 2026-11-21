@@ -2,14 +2,14 @@
 # Yagaza Kit — установка одной командой (на сервере, от root):
 #   curl -fsSL https://raw.githubusercontent.com/koksik2022/yagaza-kit/main/get.sh | sudo bash
 #   wget -qO- https://raw.githubusercontent.com/koksik2022/yagaza-kit/main/get.sh | sudo bash
-# Скачивает Yagaza Kit версии 0.2.0 по закреплённому коммиту, сверяет SHA-256,
+# Скачивает Yagaza Kit версии 0.2.1 по закреплённому коммиту, сверяет SHA-256,
 # ставит команду `yagaza` и открывает меню. `--no-menu` — только поставить/обновить.
 main() {
   set -euo pipefail
-  local VER="0.2.0" SHA="9ae37d2add0c837b3fe222761fbd5250ebd028673320060953eac7713301cbe9" NAME="yagaza-kit.sh" MENU=1
+  local VER="0.2.1" SHA="9ad3bfafc389c934e74b2a0c52347f157493e62808eb53eab3e37901101f6f83" NAME="yagaza-kit.sh" MENU=1
   local SOURCES=(
-    "https://raw.githubusercontent.com/koksik2022/yagaza-kit/560d61cf51f644b6a5ace68b3b55e43e36418533/$NAME"
-    "https://github.com/koksik2022/yagaza-kit/releases/download/v0.2.0/$NAME"
+    "https://raw.githubusercontent.com/koksik2022/yagaza-kit/02848372931c2345822382f9505d7dbd39da3fe1/$NAME"
+    "https://github.com/koksik2022/yagaza-kit/releases/download/v0.2.1/$NAME"
   )
   [ "${1:-}" = "--no-menu" ] && MENU=0
   [ -n "${YK_SOURCE:-}" ] && SOURCES=("$YK_SOURCE")
