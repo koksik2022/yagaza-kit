@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Yagaza Kit — общие функции: вывод, вопросы, лог, ОС, копии файлов.
 
-YI_VERSION="0.2.0"
+YI_VERSION="0.2.1"
 YI_ETC="${YI_ETC:-/etc/ykit}"
 YI_STATE="$YI_ETC/state"
 YI_BACKUP="$YI_ETC/backup"
@@ -44,7 +44,8 @@ run() {
 # tty_read <переменная> <приглашение>
 tty_read() {
     local __v=""
-    if [ -r /dev/tty ]; then
+    # Без терминала (скрипт, ssh без -t) /dev/tty есть, но не открывается — тогда ответ по умолчанию.
+    if { : </dev/tty; } 2>/dev/null; then
         printf '%s' "$2" >/dev/tty
         IFS= read -r __v </dev/tty || __v=""
     fi
