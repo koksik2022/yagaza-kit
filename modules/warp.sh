@@ -29,6 +29,38 @@ warp_trace() {
 }
 warp_ok() { warp_trace | grep -qE '^warp=(on|plus)$'; }
 
+# ---------- без вопросов (для бота) ----------
+# Включение — только в режиме proxy: сначала mode proxy и порт, потом connect,
+# иначе WARP завернёт весь трафик сервера.
+warp_on() {
+    warp_installed || { err "WARP не установлен."; return 1; }
+    [ -n "$(state_get warp port 2>/dev/null)" ] || { err "WARP ставился не через Yagaza Kit — включите из меню сервера."; return 1; }
+    warp_cli mode proxy >>"$YI_LOG" 2>&1 || { err "warp-cli mode proxy не сработал — не включаю."; return 1; }
+    warp_cli proxy port "$(warp_port)" >>"$YI_LOG" 2>&1 || { err "warp-cli proxy port не сработал — не включаю."; return 1; }
+    warp_cli connect >>"$YI_LOG" 2>&1 || { err "warp-cli connect не сработал."; return 1; }
+    for _ in 1 2 3 4 5 6 7 8 9 10; do warp_ok && return 0; sleep 2; done
+    err "Подключено, но проверка не показывает warp=on."; return 1
+}
+
+warp_off() {
+    warp_installed || { err "WARP не установлен."; return 1; }
+    warp_cli disconnect >>"$YI_LOG" 2>&1 || { err "warp-cli disconnect не сработал."; return 1; }
+}
+
+# Для бота: on|off, IP выхода, используется ли выходом VLESS.
+warp_state_line() {
+    local t
+    warp_installed || { echo "none"; return 0; }
+    t=$(warp_trace)
+    if printf '%s' "$t" | grep -qE '^warp=(on|plus)$'; then
+        printf 'on|%s|%s|%s\n' "$(printf '%s' "$t" | sed -n 's/^ip=//p')" "$(printf '%s' "$t" | sed -n 's/^colo=//p')" "$(warp_port)"
+    else
+        printf 'off|||%s\n' "$(warp_port)"
+    fi
+    [ -n "$(state_get vless warp_port 2>/dev/null)" ] && echo "vless_via_warp"
+    return 0
+}
+
 warp_summary() {
     if ! warp_installed; then printf 'не установлен'; return; fi
     if warp_ok; then printf 'работает, SOCKS5 :%s' "$(warp_port)"; else printf 'установлен, не подключён'; fi

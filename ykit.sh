@@ -278,7 +278,13 @@ api_cmd() {
                       else echo "Нет клиента $n" >&2; return 1; fi ;;
         awg-del)      amneziawg_client_remove "$n" ;;
         mtproxy-links) mtproxy_installed || { echo "MTProxy не установлен" >&2; return 1; }; mtproxy_links ;;
-        *) echo "api: status|ports|vless-list|vless-add N|vless-link N|vless-del N|awg-list|awg-add N|awg-file N|awg-del N|mtproxy-links" >&2; return 64 ;;
+        kaskad-list)  kaskad_rules_lines ;;
+        kaskad-add)   kaskad_rule_new "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+        kaskad-del)   kaskad_rule_remove "$n" ;;
+        warp-state)   warp_state_line ;;
+        warp-on)      warp_on ;;
+        warp-off)     warp_off ;;
+        *) echo "api: status|ports|vless-list|vless-add N|vless-link N|vless-del N|awg-list|awg-add N|awg-file N|awg-del N|mtproxy-links|kaskad-list|kaskad-add P L H T|kaskad-del N|warp-state|warp-on|warp-off" >&2; return 64 ;;
     esac
 }
 

@@ -100,7 +100,8 @@ def yg(*args, timeout=300):
     env = dict(os.environ, YI_PLAIN="1", TERM="dumb")
     try:
         p = subprocess.run([YAGAZA, "--api", *args], capture_output=True, text=True, timeout=timeout, env=env)
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
+        err = "\n".join(l[2:] if l[:2] in ("✗ ", "! ") else l for l in p.stderr.strip().splitlines())
+        return p.returncode, p.stdout.strip(), err
     except subprocess.TimeoutExpired:
         return 1, "", "yagaza не ответил за %s с" % timeout
     except FileNotFoundError:
@@ -141,9 +142,85 @@ def screen_main():
     text = "<b>Yagaza Kit</b>\n<i>%s</i>\n\n%s" % (head, "\n".join(body) or esc(err))
     return text, kb([
         [("🔑 VLESS", "v:list", "primary"), ("🛡 AmneziaWG", "a:list", "primary")],
+        [("🔀 Каскад", "k:list", None), ("☁️ WARP", "w:show", None)],
         [("📨 MTProxy", "t:links", None), ("🌐 Порты", "m:ports", None)],
         [("🔄 Обновить", "m:main", None)],
     ])
+
+
+# ---------- Каскад ----------
+
+def kaskad_rules():
+    rc, out, err = yg("kaskad-list")
+    rules = []
+    for ln in out.splitlines():
+        p = ln.split("|")
+        if len(p) == 5:
+            rules.append({"n": p[0], "proto": p[1], "lport": p[2], "host": p[3], "tport": p[4]})
+    return rules
+
+
+def rule_text(r):
+    return "%s/%s → %s:%s" % (r["lport"], r["proto"], r["host"], r["tport"])
+
+
+def screen_kaskad():
+    rules = kaskad_rules()
+    rows = [[("🔀 " + rule_text(r), "k:show:%s:%s" % (r["n"], r["lport"]), None)] for r in rules[:40]]
+    rows.append([("➕ Добавить переброс", "k:add", "success")])
+    rows.append(BACK)
+    text = ("<b>Каскад</b> · перебросов: %d\nВходящий порт этого сервера → другой сервер.\n"
+            "Нажмите на переброс, чтобы удалить." % len(rules))
+    return text, kb(rows)
+
+
+def kaskad_find(n, lport):
+    for r in kaskad_rules():
+        if r["n"] == n and r["lport"] == lport:
+            return r
+    return None
+
+
+def screen_kaskad_rule(n, lport):
+    r = kaskad_find(n, lport)
+    if not r:
+        return screen_kaskad()
+    return ("<b>Переброс</b>\n<code>%s</code>" % esc(rule_text(r)),
+            kb([[("🗑 Удалить", "k:del:%s:%s" % (n, lport), "danger")], [("‹ Назад", "k:list", None)]]))
+
+
+KASKAD_HELP = ("Пришлите одной строкой: <b>протокол порт куда порт</b>\n"
+               "Например: <code>tcp 443 1.2.3.4 443</code> или <code>both 51820 nl.example.com 51820</code>\n"
+               "Протокол: tcp, udp или both. Порт SSH и занятые программами порты бот не перебрасывает.")
+
+
+# ---------- WARP ----------
+
+def warp_state():
+    rc, out, err = yg("warp-state")
+    lines = out.splitlines()
+    if not lines or lines[0] == "none":
+        return None
+    st = lines[0].split("|") + ["", "", "", ""]
+    return {"on": st[0] == "on", "ip": st[1], "colo": st[2], "port": st[3], "vless": "vless_via_warp" in lines}
+
+
+def screen_warp(note=""):
+    s = warp_state()
+    if s is None:
+        return ("<b>☁️ WARP</b>\n\nНе установлен. Поставьте в меню сервера: <code>yagaza</code> → WARP.", kb([BACK]))
+    if s["on"]:
+        text = ("<b>☁️ WARP</b> — 🟢 включён\nВыход: <code>%s</code> (%s)\nSOCKS5: 127.0.0.1:%s"
+                % (esc(s["ip"]), esc(s["colo"]), esc(s["port"])))
+        btn = ("⏹ Выключить", "w:off", "danger")
+    else:
+        text = "<b>☁️ WARP</b> — ⚪️ выключен\nSOCKS5: 127.0.0.1:%s" % esc(s["port"])
+        btn = ("▶️ Включить", "w:on", "success")
+    if s["vless"]:
+        text += "\n\n⚠️ VLESS выпускает клиентов через WARP: без WARP у них пропадёт интернет."
+    if note:
+        text += "\n\n" + note
+    return text, kb([[btn], [("🔄 Проверить", "w:show", None)], BACK])
 
 
 def screen_ports():
@@ -236,6 +313,22 @@ def on_message(m):
             call("sendMessage", {"chat_id": cid, "text": "⛔ Нет доступа."})
         return
     text = (m.get("text") or "").strip()
+    if uid in PENDING and text and not text.startswith("/") and PENDING[uid] == "k":
+        PENDING.pop(uid)
+        args = text.split()
+        if len(args) != 4:
+            call("sendMessage", {"chat_id": cid, "text": "Нужно 4 значения через пробел.\n\n" + KASKAD_HELP, "parse_mode": "HTML"})
+            PENDING[uid] = "k"
+            return
+        call("sendMessage", {"chat_id": cid, "text": "⏳ Добавляю переброс…"})
+        rc, out, err = yg("kaskad-add", args[0].lower(), args[1], args[2], args[3])
+        if rc != 0:
+            call("sendMessage", {"chat_id": cid, "text": "⚠️ Не добавил: %s" % (err or "ошибка")})
+        else:
+            warn = "\n".join(l[6:] for l in out.splitlines() if l.startswith("warn: "))
+            call("sendMessage", {"chat_id": cid, "text": "✅ Переброс добавлен." + ("\n⚠️ " + warn if warn else "")})
+        show(cid, None, screen_kaskad())
+        return
     if uid in PENDING and text and not text.startswith("/"):
         kind = PENDING.pop(uid)
         call("sendMessage", {"chat_id": cid, "text": "⏳ Добавляю %s…" % text})
@@ -261,7 +354,60 @@ def on_callback(q):
     parts = data.split(":", 2)
     kind, act, name = (parts + ["", "", ""])[:3]
     note = None
+    answered = False
+
+    def answer_now(text):  # долгие действия: ответить на нажатие сразу, иначе запрос устареет
+        nonlocal answered
+        call("answerCallbackQuery", {"callback_query_id": q["id"], "text": text})
+        answered = True
+
     try:
+        if kind == "k":
+            if act == "list":
+                show(cid, mid, screen_kaskad())
+            elif act == "add":
+                PENDING[uid] = "k"
+                call("sendMessage", {"chat_id": cid, "text": KASKAD_HELP, "parse_mode": "HTML"})
+            elif act in ("show", "del", "delok") and ":" in name:
+                n, lport = name.split(":", 1)
+                r = kaskad_find(n, lport)
+                if not r:
+                    note = "Этого переброса уже нет"
+                    show(cid, mid, screen_kaskad())
+                elif act == "show":
+                    show(cid, mid, screen_kaskad_rule(n, lport))
+                elif act == "del":
+                    show(cid, mid, ("Удалить переброс <code>%s</code>?" % esc(rule_text(r)),
+                                    kb([[("Да, удалить", "k:delok:%s:%s" % (n, lport), "danger"),
+                                         ("Отмена", "k:show:%s:%s" % (n, lport), None)]])))
+                else:
+                    answer_now("⏳ Удаляю…")
+                    rc, out, err = yg("kaskad-del", n)
+                    show(cid, mid, screen_kaskad())
+                    if rc != 0:
+                        call("sendMessage", {"chat_id": cid, "text": "⚠️ " + (err or "ошибка")})
+            return
+        if kind == "w":
+            if act == "show":
+                show(cid, mid, screen_warp())
+            elif act == "on":
+                answer_now("⏳ Включаю WARP…")
+                rc, out, err = yg("warp-on", timeout=90)
+                show(cid, mid, screen_warp("" if rc == 0 else "⚠️ " + esc(err or "ошибка")))
+            elif act == "off":
+                s = warp_state()
+                if s and s["vless"]:
+                    show(cid, mid, ("Выключить WARP? У клиентов VLESS пропадёт интернет, пока WARP не включат.",
+                                    kb([[("Да, выключить", "w:offok", "danger"), ("Отмена", "w:show", None)]])))
+                else:
+                    answer_now("⏳ Выключаю…")
+                    rc, out, err = yg("warp-off", timeout=60)
+                    show(cid, mid, screen_warp("" if rc == 0 else "⚠️ " + esc(err or "ошибка")))
+            elif act == "offok":
+                answer_now("⏳ Выключаю…")
+                rc, out, err = yg("warp-off", timeout=60)
+                show(cid, mid, screen_warp("" if rc == 0 else "⚠️ " + esc(err or "ошибка")))
+            return
         if data == "m:main":
             show(cid, mid, screen_main())
         elif data == "m:ports":
@@ -280,11 +426,14 @@ def on_callback(q):
         elif kind in ("v", "a") and act == "del" and name:
             show(cid, mid, screen_confirm_del(kind, name))
         elif kind in ("v", "a") and act == "delok" and name:
+            answer_now("⏳ Удаляю…")
             rc, out, err = yg("vless-del" if kind == "v" else "awg-del", name)
-            note = "Удалён" if rc == 0 else ("Ошибка: " + (err or "?"))[:190]
             show(cid, mid, screen_list(kind))
+            if rc != 0:
+                call("sendMessage", {"chat_id": cid, "text": "⚠️ " + (err or "ошибка")})
     finally:
-        call("answerCallbackQuery", {"callback_query_id": q["id"], **({"text": note} if note else {})})
+        if not answered:
+            call("answerCallbackQuery", {"callback_query_id": q["id"], **({"text": note} if note else {})})
 
 
 def read_offset():

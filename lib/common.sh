@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Yagaza Kit — общие функции: вывод, вопросы, лог, ОС, копии файлов.
 
-YI_VERSION="0.1.0"
+YI_VERSION="0.2.0"
 YI_ETC="${YI_ETC:-/etc/ykit}"
 YI_STATE="$YI_ETC/state"
 YI_BACKUP="$YI_ETC/backup"

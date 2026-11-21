@@ -165,16 +165,54 @@ kaskad_add() {
 }
 
 kaskad_del() {
-    local n tmp
+    local n
     kaskad_list; [ -s "$KASKAD_RULES" ] || return 0
     ask_val n "Номер правила для удаления" ""
-    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "$(kaskad_count)" ] || { err "Нет такого номера."; return 0; }
+    kaskad_rule_remove "$n" && ok "Правило $n удалено."
+    return 0
+}
+
+# ---------- без вопросов (для бота) ----------
+
+# kaskad_rule_new <proto> <lport> <host> <tport> — строгие проверки, занятый
+# локальной программой порт НЕ берём (в меню это можно подтвердить вручную).
+kaskad_rule_new() {
+    local proto="$1" lport="$2" host="$3" tport="$4" ip p
+    case "$proto" in tcp|udp|both) ;; *) err "Протокол: tcp, udp или both."; return 1 ;; esac
+    [[ "$lport" =~ ^[0-9]+$ ]] && [ "$lport" -ge 1 ] && [ "$lport" -le 65535 ] || { err "Входящий порт — число 1–65535."; return 1; }
+    [[ "$tport" =~ ^[0-9]+$ ]] && [ "$tport" -ge 1 ] && [ "$tport" -le 65535 ] || { err "Порт цели — число 1–65535."; return 1; }
+    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || { err "Нужен IP или домен."; return 1; }
+    [[ " $(base_ssh_ports 2>/dev/null) " == *" $lport "* ]] && { err "Порт $lport — это SSH."; return 1; }
+    grep -qE "^(tcp|udp|both) $lport " "$KASKAD_RULES" 2>/dev/null && { err "Порт $lport уже перебрасывается."; return 1; }
+    for p in $( [ "$proto" = both ] && echo tcp udp || echo "$proto" ); do
+        [ -z "$(port_owner "$p" "$lport")" ] || { err "$lport/$p занят: $(port_owner "$p" "$lport"). Такой переброс — только из меню сервера."; return 1; }
+    done
+    ip=$(kaskad_resolve "$host") || { err "$host не резолвится в IPv4."; return 1; }
+    [ "$ip" = "$(server_ip)" ] && { err "Цель — этот же сервер."; return 1; }
+    command -v nft >/dev/null 2>&1 || apt_install nftables >/dev/null || { err "Нет nftables."; return 1; }
+    mkdir -p "$YI_ETC"; [ -f "$KASKAD_RULES" ] && backup_file "$KASKAD_RULES"
+    printf '%s %s %s %s\n' "$proto" "$lport" "$host" "$tport" >>"$KASKAD_RULES"; chmod 600 "$KASKAD_RULES"
+    kaskad_apply >/dev/null || { sed -i "/^$proto $lport $host $tport\$/d" "$KASKAD_RULES"; kaskad_apply >/dev/null; return 1; }
+    if [ "$proto" != udp ] && ! timeout 5 bash -c "</dev/tcp/$ip/$tport" 2>/dev/null; then
+        echo "warn: $ip:$tport/tcp сейчас не отвечает с этого сервера"
+    fi
+    return 0
+}
+
+kaskad_rule_remove() {   # kaskad_rule_remove <номер>
+    local n="$1" tmp
+    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "$(kaskad_count)" ] || { err "Нет правила номер $n."; return 1; }
     backup_file "$KASKAD_RULES"
-    tmp=$(mktemp) || return 0
+    tmp=$(mktemp) || return 1
     awk -v n="$n" '/^[[:space:]]*(#|$)/ { print; next } { if (++i != n) print }' "$KASKAD_RULES" >"$tmp"
     cat "$tmp" >"$KASKAD_RULES"; rm -f "$tmp"
-    ok "Правило $n удалено."
-    kaskad_apply
+    kaskad_apply >/dev/null
+}
+
+# Строки «номер|proto|lport|host|tport» для бота.
+kaskad_rules_lines() {
+    [ -s "$KASKAD_RULES" ] || return 0
+    awk '/^[[:space:]]*(#|$)/ { next } { printf "%d|%s|%s|%s|%s\n", ++i, $1, $2, $3, $4 }' "$KASKAD_RULES"
 }
 
 kaskad_install() {

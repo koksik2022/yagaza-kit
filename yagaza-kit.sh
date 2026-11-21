@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ykit — однофайловая сборка от 2026-11-21 13:51:40. Исходники: lib/, modules/, ykit.sh
+# ykit — однофайловая сборка от 2026-11-21 14:07:56. Исходники: lib/, modules/, ykit.sh
 # Запуск на сервере под root:  bash yagaza-kit.sh   (команда навсегда: bash yagaza-kit.sh --self-install)
 YI_BUNDLED=1
 
@@ -7,7 +7,7 @@ YI_BUNDLED=1
 # shellcheck shell=bash
 # Yagaza Kit — общие функции: вывод, вопросы, лог, ОС, копии файлов.
 
-YI_VERSION="0.1.0"
+YI_VERSION="0.2.0"
 YI_ETC="${YI_ETC:-/etc/ykit}"
 YI_STATE="$YI_ETC/state"
 YI_BACKUP="$YI_ETC/backup"
@@ -1827,16 +1827,54 @@ kaskad_add() {
 }
 
 kaskad_del() {
-    local n tmp
+    local n
     kaskad_list; [ -s "$KASKAD_RULES" ] || return 0
     ask_val n "Номер правила для удаления" ""
-    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "$(kaskad_count)" ] || { err "Нет такого номера."; return 0; }
+    kaskad_rule_remove "$n" && ok "Правило $n удалено."
+    return 0
+}
+
+# ---------- без вопросов (для бота) ----------
+
+# kaskad_rule_new <proto> <lport> <host> <tport> — строгие проверки, занятый
+# локальной программой порт НЕ берём (в меню это можно подтвердить вручную).
+kaskad_rule_new() {
+    local proto="$1" lport="$2" host="$3" tport="$4" ip p
+    case "$proto" in tcp|udp|both) ;; *) err "Протокол: tcp, udp или both."; return 1 ;; esac
+    [[ "$lport" =~ ^[0-9]+$ ]] && [ "$lport" -ge 1 ] && [ "$lport" -le 65535 ] || { err "Входящий порт — число 1–65535."; return 1; }
+    [[ "$tport" =~ ^[0-9]+$ ]] && [ "$tport" -ge 1 ] && [ "$tport" -le 65535 ] || { err "Порт цели — число 1–65535."; return 1; }
+    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || { err "Нужен IP или домен."; return 1; }
+    [[ " $(base_ssh_ports 2>/dev/null) " == *" $lport "* ]] && { err "Порт $lport — это SSH."; return 1; }
+    grep -qE "^(tcp|udp|both) $lport " "$KASKAD_RULES" 2>/dev/null && { err "Порт $lport уже перебрасывается."; return 1; }
+    for p in $( [ "$proto" = both ] && echo tcp udp || echo "$proto" ); do
+        [ -z "$(port_owner "$p" "$lport")" ] || { err "$lport/$p занят: $(port_owner "$p" "$lport"). Такой переброс — только из меню сервера."; return 1; }
+    done
+    ip=$(kaskad_resolve "$host") || { err "$host не резолвится в IPv4."; return 1; }
+    [ "$ip" = "$(server_ip)" ] && { err "Цель — этот же сервер."; return 1; }
+    command -v nft >/dev/null 2>&1 || apt_install nftables >/dev/null || { err "Нет nftables."; return 1; }
+    mkdir -p "$YI_ETC"; [ -f "$KASKAD_RULES" ] && backup_file "$KASKAD_RULES"
+    printf '%s %s %s %s\n' "$proto" "$lport" "$host" "$tport" >>"$KASKAD_RULES"; chmod 600 "$KASKAD_RULES"
+    kaskad_apply >/dev/null || { sed -i "/^$proto $lport $host $tport\$/d" "$KASKAD_RULES"; kaskad_apply >/dev/null; return 1; }
+    if [ "$proto" != udp ] && ! timeout 5 bash -c "</dev/tcp/$ip/$tport" 2>/dev/null; then
+        echo "warn: $ip:$tport/tcp сейчас не отвечает с этого сервера"
+    fi
+    return 0
+}
+
+kaskad_rule_remove() {   # kaskad_rule_remove <номер>
+    local n="$1" tmp
+    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "$(kaskad_count)" ] || { err "Нет правила номер $n."; return 1; }
     backup_file "$KASKAD_RULES"
-    tmp=$(mktemp) || return 0
+    tmp=$(mktemp) || return 1
     awk -v n="$n" '/^[[:space:]]*(#|$)/ { print; next } { if (++i != n) print }' "$KASKAD_RULES" >"$tmp"
     cat "$tmp" >"$KASKAD_RULES"; rm -f "$tmp"
-    ok "Правило $n удалено."
-    kaskad_apply
+    kaskad_apply >/dev/null
+}
+
+# Строки «номер|proto|lport|host|tport» для бота.
+kaskad_rules_lines() {
+    [ -s "$KASKAD_RULES" ] || return 0
+    awk '/^[[:space:]]*(#|$)/ { next } { printf "%d|%s|%s|%s|%s\n", ++i, $1, $2, $3, $4 }' "$KASKAD_RULES"
 }
 
 kaskad_install() {
@@ -2416,6 +2454,38 @@ warp_trace() {
 }
 warp_ok() { warp_trace | grep -qE '^warp=(on|plus)$'; }
 
+# ---------- без вопросов (для бота) ----------
+# Включение — только в режиме proxy: сначала mode proxy и порт, потом connect,
+# иначе WARP завернёт весь трафик сервера.
+warp_on() {
+    warp_installed || { err "WARP не установлен."; return 1; }
+    [ -n "$(state_get warp port 2>/dev/null)" ] || { err "WARP ставился не через Yagaza Kit — включите из меню сервера."; return 1; }
+    warp_cli mode proxy >>"$YI_LOG" 2>&1 || { err "warp-cli mode proxy не сработал — не включаю."; return 1; }
+    warp_cli proxy port "$(warp_port)" >>"$YI_LOG" 2>&1 || { err "warp-cli proxy port не сработал — не включаю."; return 1; }
+    warp_cli connect >>"$YI_LOG" 2>&1 || { err "warp-cli connect не сработал."; return 1; }
+    for _ in 1 2 3 4 5 6 7 8 9 10; do warp_ok && return 0; sleep 2; done
+    err "Подключено, но проверка не показывает warp=on."; return 1
+}
+
+warp_off() {
+    warp_installed || { err "WARP не установлен."; return 1; }
+    warp_cli disconnect >>"$YI_LOG" 2>&1 || { err "warp-cli disconnect не сработал."; return 1; }
+}
+
+# Для бота: on|off, IP выхода, используется ли выходом VLESS.
+warp_state_line() {
+    local t
+    warp_installed || { echo "none"; return 0; }
+    t=$(warp_trace)
+    if printf '%s' "$t" | grep -qE '^warp=(on|plus)$'; then
+        printf 'on|%s|%s|%s\n' "$(printf '%s' "$t" | sed -n 's/^ip=//p')" "$(printf '%s' "$t" | sed -n 's/^colo=//p')" "$(warp_port)"
+    else
+        printf 'off|||%s\n' "$(warp_port)"
+    fi
+    [ -n "$(state_get vless warp_port 2>/dev/null)" ] && echo "vless_via_warp"
+    return 0
+}
+
 warp_summary() {
     if ! warp_installed; then printf 'не установлен'; return; fi
     if warp_ok; then printf 'работает, SOCKS5 :%s' "$(warp_port)"; else printf 'установлен, не подключён'; fi
@@ -2634,7 +2704,8 @@ def yg(*args, timeout=300):
     env = dict(os.environ, YI_PLAIN="1", TERM="dumb")
     try:
         p = subprocess.run([YAGAZA, "--api", *args], capture_output=True, text=True, timeout=timeout, env=env)
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
+        err = "\n".join(l[2:] if l[:2] in ("✗ ", "! ") else l for l in p.stderr.strip().splitlines())
+        return p.returncode, p.stdout.strip(), err
     except subprocess.TimeoutExpired:
         return 1, "", "yagaza не ответил за %s с" % timeout
     except FileNotFoundError:
@@ -2675,9 +2746,85 @@ def screen_main():
     text = "<b>Yagaza Kit</b>\n<i>%s</i>\n\n%s" % (head, "\n".join(body) or esc(err))
     return text, kb([
         [("🔑 VLESS", "v:list", "primary"), ("🛡 AmneziaWG", "a:list", "primary")],
+        [("🔀 Каскад", "k:list", None), ("☁️ WARP", "w:show", None)],
         [("📨 MTProxy", "t:links", None), ("🌐 Порты", "m:ports", None)],
         [("🔄 Обновить", "m:main", None)],
     ])
+
+
+# ---------- Каскад ----------
+
+def kaskad_rules():
+    rc, out, err = yg("kaskad-list")
+    rules = []
+    for ln in out.splitlines():
+        p = ln.split("|")
+        if len(p) == 5:
+            rules.append({"n": p[0], "proto": p[1], "lport": p[2], "host": p[3], "tport": p[4]})
+    return rules
+
+
+def rule_text(r):
+    return "%s/%s → %s:%s" % (r["lport"], r["proto"], r["host"], r["tport"])
+
+
+def screen_kaskad():
+    rules = kaskad_rules()
+    rows = [[("🔀 " + rule_text(r), "k:show:%s:%s" % (r["n"], r["lport"]), None)] for r in rules[:40]]
+    rows.append([("➕ Добавить переброс", "k:add", "success")])
+    rows.append(BACK)
+    text = ("<b>Каскад</b> · перебросов: %d\nВходящий порт этого сервера → другой сервер.\n"
+            "Нажмите на переброс, чтобы удалить." % len(rules))
+    return text, kb(rows)
+
+
+def kaskad_find(n, lport):
+    for r in kaskad_rules():
+        if r["n"] == n and r["lport"] == lport:
+            return r
+    return None
+
+
+def screen_kaskad_rule(n, lport):
+    r = kaskad_find(n, lport)
+    if not r:
+        return screen_kaskad()
+    return ("<b>Переброс</b>\n<code>%s</code>" % esc(rule_text(r)),
+            kb([[("🗑 Удалить", "k:del:%s:%s" % (n, lport), "danger")], [("‹ Назад", "k:list", None)]]))
+
+
+KASKAD_HELP = ("Пришлите одной строкой: <b>протокол порт куда порт</b>\n"
+               "Например: <code>tcp 443 1.2.3.4 443</code> или <code>both 51820 nl.example.com 51820</code>\n"
+               "Протокол: tcp, udp или both. Порт SSH и занятые программами порты бот не перебрасывает.")
+
+
+# ---------- WARP ----------
+
+def warp_state():
+    rc, out, err = yg("warp-state")
+    lines = out.splitlines()
+    if not lines or lines[0] == "none":
+        return None
+    st = lines[0].split("|") + ["", "", "", ""]
+    return {"on": st[0] == "on", "ip": st[1], "colo": st[2], "port": st[3], "vless": "vless_via_warp" in lines}
+
+
+def screen_warp(note=""):
+    s = warp_state()
+    if s is None:
+        return ("<b>☁️ WARP</b>\n\nНе установлен. Поставьте в меню сервера: <code>yagaza</code> → WARP.", kb([BACK]))
+    if s["on"]:
+        text = ("<b>☁️ WARP</b> — 🟢 включён\nВыход: <code>%s</code> (%s)\nSOCKS5: 127.0.0.1:%s"
+                % (esc(s["ip"]), esc(s["colo"]), esc(s["port"])))
+        btn = ("⏹ Выключить", "w:off", "danger")
+    else:
+        text = "<b>☁️ WARP</b> — ⚪️ выключен\nSOCKS5: 127.0.0.1:%s" % esc(s["port"])
+        btn = ("▶️ Включить", "w:on", "success")
+    if s["vless"]:
+        text += "\n\n⚠️ VLESS выпускает клиентов через WARP: без WARP у них пропадёт интернет."
+    if note:
+        text += "\n\n" + note
+    return text, kb([[btn], [("🔄 Проверить", "w:show", None)], BACK])
 
 
 def screen_ports():
@@ -2770,6 +2917,22 @@ def on_message(m):
             call("sendMessage", {"chat_id": cid, "text": "⛔ Нет доступа."})
         return
     text = (m.get("text") or "").strip()
+    if uid in PENDING and text and not text.startswith("/") and PENDING[uid] == "k":
+        PENDING.pop(uid)
+        args = text.split()
+        if len(args) != 4:
+            call("sendMessage", {"chat_id": cid, "text": "Нужно 4 значения через пробел.\n\n" + KASKAD_HELP, "parse_mode": "HTML"})
+            PENDING[uid] = "k"
+            return
+        call("sendMessage", {"chat_id": cid, "text": "⏳ Добавляю переброс…"})
+        rc, out, err = yg("kaskad-add", args[0].lower(), args[1], args[2], args[3])
+        if rc != 0:
+            call("sendMessage", {"chat_id": cid, "text": "⚠️ Не добавил: %s" % (err or "ошибка")})
+        else:
+            warn = "\n".join(l[6:] for l in out.splitlines() if l.startswith("warn: "))
+            call("sendMessage", {"chat_id": cid, "text": "✅ Переброс добавлен." + ("\n⚠️ " + warn if warn else "")})
+        show(cid, None, screen_kaskad())
+        return
     if uid in PENDING and text and not text.startswith("/"):
         kind = PENDING.pop(uid)
         call("sendMessage", {"chat_id": cid, "text": "⏳ Добавляю %s…" % text})
@@ -2795,7 +2958,60 @@ def on_callback(q):
     parts = data.split(":", 2)
     kind, act, name = (parts + ["", "", ""])[:3]
     note = None
+    answered = False
+
+    def answer_now(text):  # долгие действия: ответить на нажатие сразу, иначе запрос устареет
+        nonlocal answered
+        call("answerCallbackQuery", {"callback_query_id": q["id"], "text": text})
+        answered = True
+
     try:
+        if kind == "k":
+            if act == "list":
+                show(cid, mid, screen_kaskad())
+            elif act == "add":
+                PENDING[uid] = "k"
+                call("sendMessage", {"chat_id": cid, "text": KASKAD_HELP, "parse_mode": "HTML"})
+            elif act in ("show", "del", "delok") and ":" in name:
+                n, lport = name.split(":", 1)
+                r = kaskad_find(n, lport)
+                if not r:
+                    note = "Этого переброса уже нет"
+                    show(cid, mid, screen_kaskad())
+                elif act == "show":
+                    show(cid, mid, screen_kaskad_rule(n, lport))
+                elif act == "del":
+                    show(cid, mid, ("Удалить переброс <code>%s</code>?" % esc(rule_text(r)),
+                                    kb([[("Да, удалить", "k:delok:%s:%s" % (n, lport), "danger"),
+                                         ("Отмена", "k:show:%s:%s" % (n, lport), None)]])))
+                else:
+                    answer_now("⏳ Удаляю…")
+                    rc, out, err = yg("kaskad-del", n)
+                    show(cid, mid, screen_kaskad())
+                    if rc != 0:
+                        call("sendMessage", {"chat_id": cid, "text": "⚠️ " + (err or "ошибка")})
+            return
+        if kind == "w":
+            if act == "show":
+                show(cid, mid, screen_warp())
+            elif act == "on":
+                answer_now("⏳ Включаю WARP…")
+                rc, out, err = yg("warp-on", timeout=90)
+                show(cid, mid, screen_warp("" if rc == 0 else "⚠️ " + esc(err or "ошибка")))
+            elif act == "off":
+                s = warp_state()
+                if s and s["vless"]:
+                    show(cid, mid, ("Выключить WARP? У клиентов VLESS пропадёт интернет, пока WARP не включат.",
+                                    kb([[("Да, выключить", "w:offok", "danger"), ("Отмена", "w:show", None)]])))
+                else:
+                    answer_now("⏳ Выключаю…")
+                    rc, out, err = yg("warp-off", timeout=60)
+                    show(cid, mid, screen_warp("" if rc == 0 else "⚠️ " + esc(err or "ошибка")))
+            elif act == "offok":
+                answer_now("⏳ Выключаю…")
+                rc, out, err = yg("warp-off", timeout=60)
+                show(cid, mid, screen_warp("" if rc == 0 else "⚠️ " + esc(err or "ошибка")))
+            return
         if data == "m:main":
             show(cid, mid, screen_main())
         elif data == "m:ports":
@@ -2814,11 +3030,14 @@ def on_callback(q):
         elif kind in ("v", "a") and act == "del" and name:
             show(cid, mid, screen_confirm_del(kind, name))
         elif kind in ("v", "a") and act == "delok" and name:
+            answer_now("⏳ Удаляю…")
             rc, out, err = yg("vless-del" if kind == "v" else "awg-del", name)
-            note = "Удалён" if rc == 0 else ("Ошибка: " + (err or "?"))[:190]
             show(cid, mid, screen_list(kind))
+            if rc != 0:
+                call("sendMessage", {"chat_id": cid, "text": "⚠️ " + (err or "ошибка")})
     finally:
-        call("answerCallbackQuery", {"callback_query_id": q["id"], **({"text": note} if note else {})})
+        if not answered:
+            call("answerCallbackQuery", {"callback_query_id": q["id"], **({"text": note} if note else {})})
 
 
 def read_offset():
@@ -3165,7 +3384,13 @@ api_cmd() {
                       else echo "Нет клиента $n" >&2; return 1; fi ;;
         awg-del)      amneziawg_client_remove "$n" ;;
         mtproxy-links) mtproxy_installed || { echo "MTProxy не установлен" >&2; return 1; }; mtproxy_links ;;
-        *) echo "api: status|ports|vless-list|vless-add N|vless-link N|vless-del N|awg-list|awg-add N|awg-file N|awg-del N|mtproxy-links" >&2; return 64 ;;
+        kaskad-list)  kaskad_rules_lines ;;
+        kaskad-add)   kaskad_rule_new "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+        kaskad-del)   kaskad_rule_remove "$n" ;;
+        warp-state)   warp_state_line ;;
+        warp-on)      warp_on ;;
+        warp-off)     warp_off ;;
+        *) echo "api: status|ports|vless-list|vless-add N|vless-link N|vless-del N|awg-list|awg-add N|awg-file N|awg-del N|mtproxy-links|kaskad-list|kaskad-add P L H T|kaskad-del N|warp-state|warp-on|warp-off" >&2; return 64 ;;
     esac
 }
 
